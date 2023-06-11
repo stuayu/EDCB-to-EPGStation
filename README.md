@@ -1,0 +1,2 @@
+# EDCB-to-EPGStation
+EDCBで録画が完了したらEPGStationに録画ファイルを登録するpythonスクリプト
