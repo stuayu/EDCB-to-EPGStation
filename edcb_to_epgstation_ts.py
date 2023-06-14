@@ -64,7 +64,7 @@ class ReadEnviron:
         logging.debug("start readTsProgram")
         with open(self.tsProgramFilePath, mode="+r", encoding="utf-8") as f:
             allData: str = f.read()
-            allDataLine: str = allData.split("\n")
+            allDataLine = allData.split("\n")
         
         self.description = allDataLine[4]
         self.extended = re.split("詳細情報\n|ジャンル : \n", allData)[1] # 録画詳細ファイルの解析
