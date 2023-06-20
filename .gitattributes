@@ -1,0 +1,5 @@
+* text=auto eol=crlf
+
+*.bat   text eol=crlf encoding=shiftjis
+*.ps1   text eol=crlf encoding=shiftjis
+*.bat.template text eol=crlf encoding=shiftjis

@@ -9,7 +9,7 @@ import time
 # filename="test.log"を　追加
 # 動かないなどあれば logging.DEBUGに書き換えてください
 # 追加パッケージのインストールを忘れずに
-logging.basicConfig(level=logging.INFO,
+logging.basicConfig(level=logging.DEBUG,
 format="%(asctime)s - %(levelname)s:%(name)s - %(message)s",
 filename="test.log")
 
