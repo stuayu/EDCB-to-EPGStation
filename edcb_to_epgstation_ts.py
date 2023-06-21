@@ -176,16 +176,11 @@ class VideoEncode(ReadEnviron):
             mode (str | None, optional): エンコードプリセット名. Defaults to None.
             removeOriginal (bool, optional): 元ファイルを削除するか. Defaults to False.
         """
-        parentDir = self.config["epgstationEncode"]["parentDir"]
-        directory = self.config["epgstationEncode"]["directory"]
+        parentDir = self.config["epgstationEncode"]["parentDir"] or ""
+        directory = self.config["epgstationEncode"]["directory"] or ""
         isSaveSameDirectory = self.config["epgstationEncode"]["isSaveSameDirectory"]
         mode = self.config["epgstationEncode"]["mode"]
         removeOriginal = self.config["epgstationEncode"]["removeOriginal"]
-        # EPGStationは空文字に変換しないとエラーが発生するため
-        if parentDir is None:
-            parentDir == ""
-        if directory is None:
-            directory == ""
             
         data = {
             'recordedId': self.recordedId,                      # 必須
@@ -197,6 +192,7 @@ class VideoEncode(ReadEnviron):
             'removeOriginal': removeOriginal                    # 必須
         }
         
+        logging.debug(str(data))
         headers = {'content-type': 'application/json'}
         res = requests.post(url=self.epgstationUrl + '/api/encode', data=json.dumps(data), headers= headers)
         
