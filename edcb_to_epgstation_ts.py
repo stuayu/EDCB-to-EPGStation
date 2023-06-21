@@ -5,11 +5,12 @@ import requests
 import logging
 import json
 import time
+import yaml
 
 # filename="test.log"を　追加
 # 動かないなどあれば logging.DEBUGに書き換えてください
 # 追加パッケージのインストールを忘れずに
-logging.basicConfig(level=logging.DEBUG,
+logging.basicConfig(level=logging.INFO,
 format="%(asctime)s - %(levelname)s:%(name)s - %(message)s",
 filename="test.log")
 
@@ -33,6 +34,10 @@ class ReadEnviron:
     parentDirectoryName = None
     viewName = None
     fileType = None
+    recDetailsProgramFolder = None
+    textEncoding = None
+    deleteEDCBRecFile:bool = False
+    config = None
     
     def __init__(self) -> None:
         # インスタンス変数を初期化
@@ -49,11 +54,17 @@ class ReadEnviron:
         self.endTime = datetime.datetime(year=int(os.environ.get("EDYYYY")), month=int(os.environ.get("EDMM")), day=int(os.environ.get("EDDD")), hour=int(os.environ.get("ETHH")), minute=int(os.environ.get("ETMM")), second=int(os.environ.get("ETSS")), tzinfo=JST)
         
         # ----------- 以下はそれぞれの環境に合わせて設定を変えてください ---------------
+        with open('config.yml', 'r') as yml:
+            self.config = yaml.safe_load(yml)
         
-        self.epgstationUrl = "http://localhost:8888" # EPGStationのURL
-        self.parentDirectoryName = "TS2" # EPGStationのストレージに表示されている名前
-        self.viewName = "TS" # EPGStationの再生ボタンで表示する名前
-        self.fileType = "ts" # ts か recorded で指定する
+        self.epgstationUrl = self.config["epgstationUpload"]["epgstationUrl"] # EPGStationのURL
+        self.parentDirectoryName = self.config["epgstationUpload"]["parentDirectoryName"] # EPGStationのストレージに表示されている名前
+        self.viewName = self.config["epgstationUpload"]["viewName"] # EPGStationの再生ボタンで表示する名前
+        self.fileType = self.config["epgstationUpload"]["fileType"] # ts か recorded で指定する
+        self.recDetailsProgramFolder = self.config["epgstationUpload"]["recDetailsProgramFolder"] # EDCBの録画情報保存フォルダを指定してください
+        self.textEncoding = self.config["epgstationUpload"]["textEncoding"] # EDCBの録画情報ファイルの文字コード (shift-jis or utf-8) を指定してください
+        self.deleteEDCBRecFile = self.config["epgstationUpload"]["deleteEDCBRecFile"]  # EDCBの録画ファイルをEPGStationへのアップロードが成功したら
+                                        # EDCBの録画ファイルを削除する（削除しない: False 削除する: True）
         
         # -----------------------------------------------------------------------------
         
@@ -62,7 +73,15 @@ class ReadEnviron:
         番組情報ファイルから必要なデータを取り出す
         """
         logging.debug("start readTsProgram")
-        with open(self.tsProgramFilePath, mode="+r", encoding="utf-8") as f:
+        
+        # 録画情報保存フォルダの指定がない場合はTSファイルと同じフォルダにする
+        if self.recDetailsProgramFolder is None or len(self.recDetailsProgramFolder) < 3:
+            loadPath = self.tsProgramFilePath
+        else:
+            loadPath = self.recDetailsProgramFolder + os.environ.get("FILENAME") + ".ts.program.txt"
+            
+        # 文字コードを変更可能に
+        with open(loadPath, mode="+r", encoding=self.textEncoding) as f:
             allData: str = f.read()
             allDataLine = allData.split("\n")
         
@@ -107,14 +126,104 @@ class ReadEnviron:
         res = requests.post(url=self.epgstationUrl + "/api/videos/upload", headers=headers, data=data, files=files)
         
         logging.debug(str(res.status_code))
+        
+        # 正常にアップロードがされたら録画ファイルを自動で削除する
+        if res.status_code == 200 and self.deleteEDCBRecFile == True:
+            os.remove(self.tsFilePath)
+            logging.info(f"録画データ：{self.tsFilePath}は正常に削除されました。")
+        
         logging.debug(str(res.text))
         return
+
+class VideoEncode(ReadEnviron):
+    # インスタンス変数を定義
+    recordedId = 0              # 録画済み番組 id
+    sourceVideoFileId = 0       # ビデオファイル id
+    parentDir = None            # 親ディレクトリ名 config recorded の name, isSaveSameDirectory が false の場合は必須
+    directory = None            # 親ディレクトリ以下のディレクトリ設定
+    isSaveSameDirectory = False # ソースビデオファイルと同じ場所に保存するか(初期値: False)
+    mode = None                 # エンコードプリセット名 config encode の name
+    removeOriginal = False      # 元ファイルを削除するか(初期値: False)
     
+    def __init__(self) -> None:
+        super().__init__()  # ReadEnvironからインスタンス変数を継承
+        pass
+    
+    def getSourceVideoFileId(self, recordedId: int):
+        """録画済み番組 idからビデオファイル idを検索
+
+        Args:
+            recordedId (int): 録画済み番組 id
+        """
+        headers = {'content-type': 'application/json'}
+        res = requests.get(self.epgstationUrl + f"/api/recorded/{ str(recordedId) }?isHalfWidth=true", headers=headers)
+        
+        videoFileId = int(res.json()['videoFiles'][0]['id'])
+        logging.debug("videoFileId:" + str(videoFileId))
+        
+        self.recordedId = recordedId
+        self.sourceVideoFileId = videoFileId
+        
+        return
+    
+    def addVideoEncode(self):
+        """エンコードタスクに追加する
+
+        Args:
+            parentDir (str | None, optional): 親ディレクトリ名. Defaults to None.
+            directory (str | None, optional): 親ディレクトリ以下のディレクトリ設定. Defaults to None.
+            isSaveSameDirectory (bool, optional): ソースビデオファイルと同じ場所に保存するか. Defaults to False.
+            mode (str | None, optional): エンコードプリセット名. Defaults to None.
+            removeOriginal (bool, optional): 元ファイルを削除するか. Defaults to False.
+        """
+        parentDir = self.config["epgstationEncode"]["parentDir"]
+        directory = self.config["epgstationEncode"]["directory"]
+        isSaveSameDirectory = self.config["epgstationEncode"]["isSaveSameDirectory"]
+        mode = self.config["epgstationEncode"]["mode"]
+        removeOriginal = self.config["epgstationEncode"]["removeOriginal"]
+        # EPGStationは空文字に変換しないとエラーが発生するため
+        if parentDir is None:
+            parentDir == ""
+        if directory is None:
+            directory == ""
+            
+        data = {
+            'recordedId': self.recordedId,                      # 必須
+            'sourceVideoFileId': self.sourceVideoFileId,        # 必須
+            'parentDir': parentDir,
+            'directory': directory,
+            'isSaveSameDirectory': isSaveSameDirectory,
+            'mode': mode,                                       # 必須
+            'removeOriginal': removeOriginal                    # 必須
+        }
+        
+        headers = {'content-type': 'application/json'}
+        res = requests.post(url=self.epgstationUrl + '/api/encode', data=json.dumps(data), headers= headers)
+        
+        logging.debug(json.dumps(data))
+        logging.debug(str(res.status_code) + '\n' + res.text)
+        
+        return
+
 if __name__ == '__main__':
     try:
         start = ReadEnviron() # インスタンス生成
         start.readTsProgram()
         recordedId = start.createRecData()
         start.uploadTsVideoFile(recordedId=recordedId)
+        
+        if start.config["epgstationEncode"]["runEncode"] == False:
+            exit()
+        else:
+            logging.info("エンコードを開始します。")
     except Exception as e:
         logging.exception(e) # エラーが発生したらファイルに書き込み
+    
+    # エンコードタスクを実行
+    try:
+        encode = VideoEncode()
+        encode.getSourceVideoFileId(recordedId=recordedId)
+        encode.addVideoEncode() # エンコードタスクに追加
+    
+    except Exception as e:
+        logging.exception(e)

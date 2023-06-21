@@ -8,4 +8,4 @@ rem // ‚±‚¤‚·‚é‚±‚Æ‚Å Python ‘¤‚Å‚àŠÂ‹«•Ï”‚ðŽQÆ‚Å‚«‚é
 rem _EDCBX_DIRECT_
 
 rem EDCB‚Å˜^‰æ‚µ‚½Œ‹‰Ê‚ðEPGStation‚Ì˜^‰æÏ‚Ý‚Æ‚µ‚Äˆ—‚·‚é
-python.exe %~dp0\edcb_to_epgstation_ts.py
+%~dp0\dist\edcb_to_epgstation_ts_INFO.exe

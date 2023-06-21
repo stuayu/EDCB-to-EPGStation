@@ -29,4 +29,4 @@ set ETSS=00
 
 
 rem EDCB‚Å˜^‰æ‚µ‚½Œ‹‰Ê‚ğEPGStation‚Ì˜^‰æÏ‚İ‚Æ‚µ‚Äˆ—‚·‚é
-python.exe %~dp0\edcb_to_epgstation_ts.py
+%~dp0\dist\edcb_to_epgstation_ts_DEBUG.exe
