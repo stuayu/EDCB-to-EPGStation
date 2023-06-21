@@ -3,7 +3,7 @@ epgstationUpload:
   parentDirectoryName: "TS2" # EPGStationのストレージに表示されている名前
   viewName: "TS" # EPGStationの再生ボタンで表示する名前
   fileType: "ts" # ts か recorded で指定する
-  recDetailsProgramFolder: "F:/EDCB/programs" # EDCBの録画情報保存フォルダを指定してください
+  recDetailsProgramFolder: "F:/EDCB/programs/" # EDCBの録画情報保存フォルダを指定してください(最後に / をいれてください)
   textEncoding: "utf-8" # EDCBの録画情報ファイルの文字コード (shift-jis or utf-8) を指定してください
   deleteEDCBRecFile: false  # EDCBの録画ファイルをEPGStationへのアップロードが成功したらEDCBの録画ファイルを削除する（削除しない: false 削除する: true）
 
