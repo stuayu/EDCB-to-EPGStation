@@ -54,7 +54,7 @@ class ReadEnviron:
         self.endTime = datetime.datetime(year=int(os.environ.get("EDYYYY")), month=int(os.environ.get("EDMM")), day=int(os.environ.get("EDDD")), hour=int(os.environ.get("ETHH")), minute=int(os.environ.get("ETMM")), second=int(os.environ.get("ETSS")), tzinfo=JST)
         
         # ----------- 以下はそれぞれの環境に合わせて設定を変えてください ---------------
-        with open('config.yml', 'r') as yml:
+        with open('config.yml', 'r', encoding="utf-8") as yml:
             self.config = yaml.safe_load(yml)
         
         self.epgstationUrl = self.config["epgstationUpload"]["epgstationUrl"] # EPGStationのURL
