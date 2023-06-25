@@ -6,6 +6,7 @@ import logging
 import json
 import time
 import yaml
+import sys
 
 # filename="test.log"を　追加
 # 動かないなどあれば logging.DEBUGに書き換えてください
@@ -209,7 +210,7 @@ if __name__ == '__main__':
         start.uploadTsVideoFile(recordedId=recordedId)
         
         if start.config["epgstationEncode"]["runEncode"] == False:
-            exit()
+            sys.exit()
         else:
             logging.info("エンコードを開始します。")
     except Exception as e:
