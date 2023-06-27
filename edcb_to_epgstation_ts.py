@@ -7,6 +7,7 @@ import json
 import time
 import yaml
 import sys
+import psutil
 
 # filename="test.log"を　追加
 # 動かないなどあれば logging.DEBUGに書き換えてください
@@ -117,6 +118,23 @@ class ReadEnviron:
         Args:
             recordedId (int): 録画済み番組のID
         """
+        waitRecordedProcess = bool(self.config["epgstationUpload"]["waitRecordedProcess"])
+        waitTimeInterval = int(self.config["epgstationUpload"]["waitTimeInterval"])
+        
+        # EpgDataCap_Bonのプロセスが起動中であればアップロード処理を待機する
+        if waitRecordedProcess == True:
+            logging.debug("EpgDataCap_Bonのプロセス確認が有効になっています")
+            check = True
+            while check:
+                check = False
+                for proc in psutil.process_iter():
+                    
+                    if 'EpgDataCap_Bon' in proc.name():
+                        check = True
+                
+                if check == True:
+                    time.sleep(waitTimeInterval) # 次回のプロセス確認までのインターバル
+
         logging.debug("start uploadTsVideoFile")
         
         headers = {'accept': 'application/json'}

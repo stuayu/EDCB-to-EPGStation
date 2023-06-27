@@ -6,6 +6,8 @@ epgstationUpload:
   recDetailsProgramFolder: "F:/EDCB/programs/" # EDCBの録画情報保存フォルダを指定してください(最後に / をいれてください)
   textEncoding: "utf-8" # EDCBの録画情報ファイルの文字コード (shift-jis or utf-8) を指定してください
   deleteEDCBRecFile: false  # EDCBの録画ファイルをEPGStationへのアップロードが成功したらEDCBの録画ファイルを削除する（削除しない: false 削除する: true）
+  waitRecordedProcess: true # EDCBのEpgDataCap_Bonが起動している場合はアップロード実行を待つ
+  waitTimeInterval: 60      # OSのプロセス状態を確認する間隔(秒)
 
 epgstationEncode:
   runEncode: true   # アップロード後自動エンコードを実行するか
