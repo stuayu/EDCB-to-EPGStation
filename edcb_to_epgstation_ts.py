@@ -139,12 +139,15 @@ class ReadEnviron:
         
         headers = {'accept': 'application/json'}
         data = {'recordedId': recordedId, 'parentDirectoryName': self.parentDirectoryName, 'viewName': self.viewName, 'fileType': self.fileType}
-        files = {'file': (open(self.tsFilePath, 'rb'))}
+        f = open(self.tsFilePath, 'rb')
+        files = {'file': f}
         
         logging.debug(str(data))
         res = requests.post(url=self.epgstationUrl + "/api/videos/upload", headers=headers, data=data, files=files)
         
         logging.debug(str(res.status_code))
+        
+        f.close() # ファイルを閉じる
         
         # 正常にアップロードがされたら録画ファイルを自動で削除する
         if res.status_code == 200 and self.deleteEDCBRecFile == True:
