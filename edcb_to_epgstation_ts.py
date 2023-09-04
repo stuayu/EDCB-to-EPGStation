@@ -8,6 +8,7 @@ import time
 import yaml
 import sys
 import psutil
+import random
 
 # filename="test.log"を　追加
 # 動かないなどあれば logging.DEBUGに書き換えてください
@@ -120,6 +121,11 @@ class ReadEnviron:
         """
         waitRecordedProcess = bool(self.config["epgstationUpload"]["waitRecordedProcess"])
         waitTimeInterval = int(self.config["epgstationUpload"]["waitTimeInterval"])
+        waitTimeRandomMargin = int(self.config["epgstationUpload"]["waitTimeRandomMargin"])
+        cpuUsageLowerLimit = int(self.config["epgstationUpload"]["cpuUsageLowerLimit"])
+        
+        # 乱数を生成し、チェック間隔をずらす。
+        waitTimeRandomMargin = random.randint(0, waitTimeRandomMargin)
         
         # EpgDataCap_Bonのプロセスが起動中であればアップロード処理を待機する
         if waitRecordedProcess == True:
@@ -134,6 +140,13 @@ class ReadEnviron:
                 
                 if check == True:
                     time.sleep(waitTimeInterval) # 次回のプロセス確認までのインターバル
+                
+                # CPU使用率の監視 計算結果は 51.049060 のようになるはず
+                cpu_percent = psutil.cpu_percent(percpu=True)
+                
+                # 設定したCPU使用率の下限値よりも高ければループ
+                if cpu_percent >= cpuUsageLowerLimit:
+                    check = True
 
         logging.debug("start uploadTsVideoFile")
         

@@ -8,4 +8,6 @@ rem // こうすることで Python 側でも環境変数を参照できる
 rem _EDCBX_DIRECT_
 
 rem EDCBで録画した結果をEPGStationの録画済みとして処理する
+rem ディレクトリ移動
+cd %~dp0
 %~dp0\dist\edcb_to_epgstation_ts_INFO.exe
