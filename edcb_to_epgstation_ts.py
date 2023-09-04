@@ -142,10 +142,10 @@ class ReadEnviron:
                     time.sleep(waitTimeInterval) # 次回のプロセス確認までのインターバル
                 
                 # CPU使用率の監視 計算結果は 51.049060 のようになるはず
-                cpu_percent = psutil.cpu_percent(percpu=True)
+                cpu_percent = psutil.cpu_percent(interval=1)
                 
                 # 設定したCPU使用率の下限値よりも高ければループ
-                if cpu_percent >= cpuUsageLowerLimit:
+                if int(cpu_percent) >= cpuUsageLowerLimit:
                     check = True
 
         logging.debug("start uploadTsVideoFile")
