@@ -250,7 +250,15 @@ class ReadEnviron:
 
         # 正常にアップロードがされたら録画ファイルを自動で削除する
         if res["code"] == 200 and self.deleteEDCBRecFile == True:
-            os.remove(self.tsFilePath)
+            for i in range(10):
+                try:
+                    os.remove(self.tsFilePath)
+                    break
+                except PermissionError:
+                    # サムネイル生成が動いておりファイルを使用中
+                    time.sleep(30)
+                except Exception as e:
+                    logger.error(e, stack_info=True)
             logger.info(f"録画データ：{self.tsFilePath}は正常に削除されました。")
 
         return
@@ -343,7 +351,7 @@ if __name__ == "__main__":
         recordedId = start.createRecData()
         start.uploadTsVideoFile(recordedId=recordedId)
 
-        if start.config["epgstationEncode"]["runEncode"] == False:
+        if bool(start.config["epgstationEncode"]["runEncode"]) is False:
             sys.exit()
         else:
             logger.info("エンコードを開始します。")
