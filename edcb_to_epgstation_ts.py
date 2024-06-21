@@ -12,7 +12,7 @@ import sys
 import psutil
 import random
 import setproctitle
-from box import Box
+from box import Box, ConfigBox
 
 # ログを書き込む
 handler = RotatingFileHandler(
@@ -79,8 +79,8 @@ class ReadEnviron:
             )
 
             # ----------- 以下はそれぞれの環境に合わせて設定を変えてください ---------------
-            with open("./config.yml", "r", encoding="utf-8") as yml:
-                self.config = Box(yaml.safe_load(yml))
+            self.config = Box.from_yaml(filename="./config.yml", encoding="utf-8")
+            logger.debug(self.config)
 
             self.epgstationUrl = self.config.epgstationUpload.epgstationUrl  # EPGStationのURL
             self.parentDirectoryName = self.config.epgstationUpload.parentDirectoryName  # EPGStationのストレージに表示されている名前
@@ -89,8 +89,8 @@ class ReadEnviron:
             self.recDetailsProgramFolder = self.config.epgstationUpload.recDetailsProgramFolder  # EDCBの録画情報保存フォルダを指定してください
             self.textEncoding = self.config.epgstationUpload.textEncoding  # EDCBの録画情報ファイルの文字コード (shift-jis or utf-8) を指定してください
             # EDCBの録画ファイルをEPGStationへのアップロードが成功したらEDCBの録画ファイルを削除する（削除しない: False 削除する: True）
-            self.deleteEDCBRecFile = True if self.config.epgstationUpload.deleteEDCBRecFile == "true" or self.config.epgstationUpload.deleteEDCBRecFile == "True" else False
-            self.delayDeleteTime = int(self.config.epgstationUpload.delayDeleteTime)
+            self.deleteEDCBRecFile = self.config.epgstationUpload.deleteEDCBRecFile
+            self.delayDeleteTime = self.config.epgstationUpload.delayDeleteTime
 
             # -----------------------------------------------------------------------------
         except TypeError:
@@ -178,8 +178,7 @@ class ReadEnviron:
         Args:
             recordedId (int): 録画済み番組のID
         """
-        waitRecordedProcess = True if self.config.epgstationUpload.waitRecordedProcess == "true" or self.config.epgstationUpload.waitRecordedProcess == "True" else False
-        progMultiProcess = True if self.config.epgstationUpload.progMultiProcess == "true" or self.config.epgstationUpload.progMultiProcess == "True" else False
+        waitRecordedProcess = self.config.epgstationUpload.waitRecordedProcess
         waitTimeInterval = int(self.config.epgstationUpload.waitTimeInterval)
         waitTimeRandomMargin = int(self.config.epgstationUpload.waitTimeRandomMargin)
         cpuUsageLowerLimit = int(self.config.epgstationUpload.cpuUsageLowerLimit)
@@ -187,7 +186,6 @@ class ReadEnviron:
         # 乱数を生成し、チェック間隔をずらす。
         waitTimeRandomMargin = random.randint(0, waitTimeRandomMargin)
         logger.debug(f"waitRecordedProcess: {waitRecordedProcess}")
-        logger.debug(f"progMultiProcess: {progMultiProcess}")
         logger.debug(f"waitTimeInterval: {waitTimeInterval}")
         logger.debug(f"waitTimeRandomMargin: {waitTimeRandomMargin}")
         logger.debug(f"cpuUsageLowerLimit: {cpuUsageLowerLimit}")
@@ -207,20 +205,6 @@ class ReadEnviron:
                 if check == True:
                     time.sleep(waitTimeInterval)  # 次回のプロセス確認までのインターバル
                     continue
-        # 同じプロセスが別に起動していればほかの処理が終わるまで待機する
-        if progMultiProcess == True:
-            logger.debug("EDCB-to-EPGStationのプロセス確認が有効になっています")
-            check = True
-            while check:
-                check = False
-                for proc in psutil.process_iter():
-                    if "edcb_to_epgstation" in proc.name():
-                        check = True
-                        break
-
-                if check == True:
-                    time.sleep(waitTimeInterval)  # 次回のプロセス確認までのインターバル
-                    continue
 
         check = True
         while check:
@@ -234,47 +218,56 @@ class ReadEnviron:
                 check = True
 
         logger.debug("start uploadTsVideoFile")
+        
+        def upload():
+            try:
+                logger.debug("open file")
+                result = subprocess.run(
+                    [
+                        "C:\\Windows\\System32\\curl.exe",
+                        "limit-rate 100M",
+                        "-X",
+                        "POST",
+                        f"{self.epgstationUrl}/api/videos/upload",
+                        "-H",
+                        "accept: application/json",
+                        "-H",
+                        "Content-Type: multipart/form-data",
+                        "-F",
+                        f"recordedId={recordedId}",
+                        "-F",
+                        f"parentDirectoryName={self.parentDirectoryName}",
+                        "-F",
+                        f"viewName={self.viewName}",
+                        "-F",
+                        f"fileType={self.fileType}",
+                        "-F",
+                        f"file=@{self.tsFilePath};type=text/plain",
+                    ],
+                    shell=True,
+                    check=True,
+                    capture_output=True,
+                )
+                logger.info(f"res: {result.stdout}")
+                logger.debug(f"res: {result.stderr}")
 
-        try:
-            logger.debug("open file")
-            result = subprocess.run(
-                [
-                    "C:\\Windows\\System32\\curl.exe",
-                    "limit-rate 100M",
-                    "-X",
-                    "POST",
-                    f"{self.epgstationUrl}/api/videos/upload",
-                    "-H",
-                    "accept: application/json",
-                    "-H",
-                    "Content-Type: multipart/form-data",
-                    "-F",
-                    f"recordedId={recordedId}",
-                    "-F",
-                    f"parentDirectoryName={self.parentDirectoryName}",
-                    "-F",
-                    f"viewName={self.viewName}",
-                    "-F",
-                    f"fileType={self.fileType}",
-                    "-F",
-                    f"file=@{self.tsFilePath};type=text/plain",
-                ],
-                shell=True,
-                check=True,
-                capture_output=True,
-            )
-            logger.info(f"res: {result.stdout}")
-            logger.debug(f"res: {result.stderr}")
+                res = json.loads(result.stdout.decode(encoding="shift-jis"))
+                logger.debug(res)
+                return res
 
-            res = json.loads(result.stdout.decode(encoding="shift-jis"))
-            logger.debug(res)
+            except Exception as e:
+                logger.error(e, stack_info=True)
+                sys.exit()
+        
 
-        except Exception as e:
-            logger.error(e, stack_info=True)
-            sys.exit()
-
+        while True:
+            res = upload()
+            if res["code"] == 200:
+                break
+        
         # 正常にアップロードがされたら録画ファイルを自動で削除する
-        if res["code"] == 200 and self.deleteEDCBRecFile == True:
+        if self.deleteEDCBRecFile == True:
+            logger.debug("正常にアップロードが完了したため、EDCBから録画ファイルを削除します。")
             if self.delayDeleteTime > 1:
                 time.sleep(self.delayDeleteTime)
             for i in range(10):
@@ -346,9 +339,9 @@ class VideoEncode(ReadEnviron):
         """
         parentDir = self.config.epgstationEncode.parentDir or ""
         directory = self.config.epgstationEncode.directory or ""
-        isSaveSameDirectory = True if self.config.epgstationEncode.isSaveSameDirectory == "true" or self.config.epgstationEncode.isSaveSameDirectory == "True" else False
+        isSaveSameDirectory = self.config.epgstationEncode.isSaveSameDirectory
         mode = self.config.epgstationEncode.mode
-        removeOriginal = True if self.config.epgstationEncode.removeOriginal == "true" or self.config.epgstationEncode.removeOriginal == "True" else False
+        removeOriginal = self.config.epgstationEncode.removeOriginal
 
         data = {
             "recordedId": self.recordedId,  # 必須
@@ -383,7 +376,7 @@ if __name__ == "__main__":
         recordedId = start.createRecData()
         start.uploadTsVideoFile(recordedId=recordedId)
 
-        if start.config.epgstationEncode.runEncode == "true" or start.config.epgstationEncode.runEncode == "True":
+        if start.config.epgstationEncode.runEncode == True:
             logger.info("エンコードを開始します。")
             pass
         else:
