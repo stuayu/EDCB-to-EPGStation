@@ -88,8 +88,8 @@ class ReadEnviron:
             self.fileType = self.config.epgstationUpload.fileType  # ts か recorded で指定する
             self.recDetailsProgramFolder = self.config.epgstationUpload.recDetailsProgramFolder  # EDCBの録画情報保存フォルダを指定してください
             self.textEncoding = self.config.epgstationUpload.textEncoding  # EDCBの録画情報ファイルの文字コード (shift-jis or utf-8) を指定してください
-            self.deleteEDCBRecFile = self.config.epgstationUpload.deleteEDCBRecFile  # EDCBの録画ファイルをEPGStationへのアップロードが成功したら
-            # EDCBの録画ファイルを削除する（削除しない: False 削除する: True）
+            # EDCBの録画ファイルをEPGStationへのアップロードが成功したらEDCBの録画ファイルを削除する（削除しない: False 削除する: True）
+            self.deleteEDCBRecFile = True if self.config.epgstationUpload.deleteEDCBRecFile == "true" or self.config.epgstationUpload.deleteEDCBRecFile == "True" else False
             self.delayDeleteTime = int(self.config.epgstationUpload.delayDeleteTime)
 
             # -----------------------------------------------------------------------------
@@ -178,14 +178,20 @@ class ReadEnviron:
         Args:
             recordedId (int): 録画済み番組のID
         """
-        waitRecordedProcess = bool(self.config.epgstationUpload.waitRecordedProcess)
-        progMultiProcess = bool(self.config.epgstationUpload.progMultiProcess)
+        waitRecordedProcess = True if self.config.epgstationUpload.waitRecordedProcess == "true" or self.config.epgstationUpload.waitRecordedProcess == "True" else False
+        progMultiProcess = True if self.config.epgstationUpload.progMultiProcess == "true" or self.config.epgstationUpload.progMultiProcess == "True" else False
         waitTimeInterval = int(self.config.epgstationUpload.waitTimeInterval)
         waitTimeRandomMargin = int(self.config.epgstationUpload.waitTimeRandomMargin)
         cpuUsageLowerLimit = int(self.config.epgstationUpload.cpuUsageLowerLimit)
 
         # 乱数を生成し、チェック間隔をずらす。
         waitTimeRandomMargin = random.randint(0, waitTimeRandomMargin)
+        logger.debug(f"waitRecordedProcess: {waitRecordedProcess}")
+        logger.debug(f"progMultiProcess: {progMultiProcess}")
+        logger.debug(f"waitTimeInterval: {waitTimeInterval}")
+        logger.debug(f"waitTimeRandomMargin: {waitTimeRandomMargin}")
+        logger.debug(f"cpuUsageLowerLimit: {cpuUsageLowerLimit}")
+        logger.debug(f"waitTimeRandomMargin: {waitTimeRandomMargin}")
 
         # EpgDataCap_Bonのプロセスが起動中であればアップロード処理を待機する
         if waitRecordedProcess == True:
@@ -196,6 +202,7 @@ class ReadEnviron:
                 for proc in psutil.process_iter():
                     if "EpgDataCap_Bon" in proc.name():
                         check = True
+                        break
 
                 if check == True:
                     time.sleep(waitTimeInterval)  # 次回のプロセス確認までのインターバル
@@ -209,6 +216,7 @@ class ReadEnviron:
                 for proc in psutil.process_iter():
                     if "edcb_to_epgstation" in proc.name():
                         check = True
+                        break
 
                 if check == True:
                     time.sleep(waitTimeInterval)  # 次回のプロセス確認までのインターバル
@@ -338,9 +346,9 @@ class VideoEncode(ReadEnviron):
         """
         parentDir = self.config.epgstationEncode.parentDir or ""
         directory = self.config.epgstationEncode.directory or ""
-        isSaveSameDirectory = self.config.epgstationEncode.isSaveSameDirectory
+        isSaveSameDirectory = True if self.config.epgstationEncode.isSaveSameDirectory == "true" or self.config.epgstationEncode.isSaveSameDirectory == "True" else False
         mode = self.config.epgstationEncode.mode
-        removeOriginal = self.config.epgstationEncode.removeOriginal
+        removeOriginal = True if self.config.epgstationEncode.removeOriginal == "true" or self.config.epgstationEncode.removeOriginal == "True" else False
 
         data = {
             "recordedId": self.recordedId,  # 必須
@@ -375,10 +383,11 @@ if __name__ == "__main__":
         recordedId = start.createRecData()
         start.uploadTsVideoFile(recordedId=recordedId)
 
-        if bool(start.config["epgstationEncode"]["runEncode"]) is False:
-            sys.exit()
-        else:
+        if start.config.epgstationEncode.runEncode == "true" or start.config.epgstationEncode.runEncode == "True":
             logger.info("エンコードを開始します。")
+            pass
+        else:
+            sys.exit()
     except Exception as e:
         logger.exception(e)  # エラーが発生したらファイルに書き込み
         sys.exit()
