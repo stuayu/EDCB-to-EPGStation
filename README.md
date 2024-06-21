@@ -16,9 +16,21 @@ exe化したので以下の作業は不要になりました。
 動かないことがあれば、自動で生成される test.log をご確認ください。
 BUGなどあればご連絡ください
 
+## 環境構築(ビルド)
+```pwsh
+pyenv install 3.12.4
+pyenv local 3.12.4
+
+poetry install --no-root
+poetry run nuitka .\edcb_to_epgstation_ts.py --onefile --standalone --output-dir=dist --output-filename=edcb_to_epgstation_ts.exe
+```
+
 ## うまく動作しないとき
 
-powershell上で `edcb_to_epgstation_ts.bat` を実行してみてください。powershell上に問題が表示される場合があります。
+powershell上で `edcb_to_epgstation_ts.bat` を実行してみてください。powershell上に問題が表示される場合があります。\
+またログファイルを生成するため、確認して随時対応してください。
 
 ## ビルド
-* pyinstaller.exe .\edcb_to_epgstation_ts.py --onefile --name edcb_to_epgstation_ts_INFO.exe
+* python -m pyinstaller .\edcb_to_epgstation_ts.py --onefile --name edcb_to_epgstation_ts.exe
+* python -m nuitka .\edcb_to_epgstation_ts.py --onefile --standalone --output-dir=dist --output-filename=edcb_to_epgstation_ts.exe
+* poetry run nuitka .\edcb_to_epgstation_ts.py --onefile --standalone --output-dir=dist --output-filename=edcb_to_epgstation_ts.exe

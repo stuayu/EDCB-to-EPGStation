@@ -1,3 +1,7 @@
 build
 *.spec
 *.yml
+*.build
+*.dist
+*.onefile-build
+*.log*

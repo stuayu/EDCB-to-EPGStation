@@ -5,8 +5,10 @@ epgstationUpload:
   fileType: "ts" # ts か recorded で指定する
   recDetailsProgramFolder: "F:/EDCB/programs/" # EDCBの録画情報保存フォルダを指定してください(最後に / をいれてください)
   textEncoding: "utf-8" # EDCBの録画情報ファイルの文字コード (shift-jis or utf-8) を指定してください
-  deleteEDCBRecFile: false  # EDCBの録画ファイルをEPGStationへのアップロードが成功したらEDCBの録画ファイルを削除する（削除しない: false 削除する: true）
+  deleteEDCBRecFile: true  # EDCBの録画ファイルをEPGStationへのアップロードが成功したらEDCBの録画ファイルを削除する（削除しない: false 削除する: true）
+  delayDeleteTime: 300 # EDCBの録画ファイルをEPGStationへのアップロードが成功したら録画ファイルを削除するまでの遅延
   waitRecordedProcess: true # EDCBのEpgDataCap_Bonが起動している場合はアップロード実行を待つ
+  progMultiProcess: true # EDCB-to-EPGStationがすでに起動していたらアップロード処理を待機する
   waitTimeInterval: 60      # OSのプロセス状態を確認する間隔(秒)
   waitTimeRandomMargin: 60  # 0sから指定秒数の間ランダムに数字を生成し、システムに負荷が集中するのを防ぐ。
   cpuUsageLowerLimit: 60    # CPU使用率の監視 0~100 で指定してください。(0にすると永遠と動作しません)例)60%を下回った場合にアップロードを実行
