@@ -64,7 +64,7 @@ fn default_retries() -> usize {
     5
 }
 fn default_wait() -> u64 {
-    720
+    30
 }
 fn default_log_level() -> String {
     "info".into()
@@ -319,8 +319,8 @@ impl Clock for RealClock {
     }
 }
 pub trait Http {
-    fn post_success(&self, url: &str, body: serde_json::Value) -> Result<()> {
-        self.post_json(url, body).map(|_| ())
+    fn post_success(&self, url: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+        self.post_json(url, body)
     }
     fn post_multipart(&self, url: &str, form: multipart::Form) -> Result<serde_json::Value>;
     fn post_json(&self, url: &str, body: serde_json::Value) -> Result<serde_json::Value>;
@@ -335,12 +335,16 @@ impl ReqwestHttp {
     }
 }
 impl Http for ReqwestHttp {
-    fn post_success(&self, url: &str, body: serde_json::Value) -> Result<()> {
-        let response = self.c.post(url).json(&body).send()?;
+    fn post_success(&self, url: &str, body: serde_json::Value) -> Result<serde_json::Value> {
+        let mut response = self.c.post(url).json(&body).send()?;
         if !response.status().is_success() {
             bail!("POST {url}: HTTP {}", response.status());
         }
-        Ok(())
+        let mut text = String::new();
+        if response.read_to_string(&mut text).is_err() || text.is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        Ok(serde_json::from_str(&text).unwrap_or(serde_json::Value::Null))
     }
     fn post_multipart(&self, url: &str, form: multipart::Form) -> Result<serde_json::Value> {
         response_json(
@@ -471,6 +475,7 @@ pub fn upload(
         cfg.epgstation_url.trim_end_matches('/')
     );
     for attempt in 0..cfg.upload_max_retry {
+        let attempt_start = clock.now();
         let result = (|| -> Result<serde_json::Value> {
             let base = multipart::Form::new()
                 .text("recordedId", id.to_string())
@@ -505,7 +510,24 @@ pub fn upload(
             Ok(json)
         })();
         match result {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                let elapsed = clock.now().saturating_sub(attempt_start).as_secs_f64();
+                if cfg.upload_mode.eq_ignore_ascii_case("path") {
+                    logger.info(&format!(
+                        "path 登録成功: recordedId={id} ({}/{} 回目)",
+                        attempt + 1,
+                        cfg.upload_max_retry
+                    ));
+                } else {
+                    let size = fs::metadata(&r.filepath).map(|m| m.len()).unwrap_or(0);
+                    logger.info(&format!(
+                        "upload 成功: recordedId={id} size={size} elapsed={elapsed:.3} ({}/{} 回目)",
+                        attempt + 1,
+                        cfg.upload_max_retry
+                    ));
+                }
+                return Ok(());
+            }
             Err(e) => {
                 logger.error(&format!(
                     "upload {}/{} 回目失敗: {e:#}",
@@ -523,6 +545,11 @@ pub fn upload(
 }
 pub fn delete_recording(path: &Path, cfg: &UploadConfig, sleeper: &dyn Clock, logger: &Logger) {
     if !cfg.delete_edcb_rec_file {
+        return;
+    }
+    // path モードでは EPGStation がファイルを移動済みのことが多い。無駄な待機で後続バッチを止めない。
+    if matches!(path.try_exists(), Ok(false)) {
+        logger.info("録画ファイルは既に存在しないため削除をスキップ");
         return;
     }
     sleeper.sleep(Duration::from_secs(cfg.delay_delete_time));
@@ -580,8 +607,17 @@ fn encode(
         }
     }
     let source = video.ok_or_else(|| anyhow!("videoFileIdを取得できません"))?;
+    logger.info(&format!("videoFileId={source}"));
     let body = serde_json::json!({"recordedId":id,"sourceVideoFileId":source,"parentDir":cfg.epgstation_encode.parent_dir.as_deref().unwrap_or(""),"directory":cfg.epgstation_encode.directory.as_deref().unwrap_or(""),"isSaveSameDirectory":cfg.epgstation_encode.is_save_same_directory,"mode":cfg.epgstation_encode.mode,"removeOriginal":cfg.epgstation_encode.remove_original});
-    http.post_success(&format!("{base}/api/encode"), body)?;
+    let response = http.post_success(&format!("{base}/api/encode"), body)?;
+    let encode_id = response["encodeId"]
+        .as_i64()
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| "不明".to_string());
+    logger.info(&format!(
+        "エンコード依頼: encodeId={encode_id} mode={}",
+        cfg.epgstation_encode.mode
+    ));
     Ok(())
 }
 fn run() -> Result<()> {
@@ -650,6 +686,28 @@ pub fn process_recording(
     logger: &Logger,
     margin: Duration,
 ) -> Result<()> {
+    let started = clock.now();
+    let metadata = fs::metadata(&r.filepath)
+        .with_context(|| format!("録画ファイルを確認できません: {}", r.filepath.display()))?;
+    if metadata.len() == 0 {
+        logger.warn("録画ファイルが 0 バイトのため登録をスキップ");
+        return Ok(());
+    }
+    let path_mode = cfg
+        .epgstation_upload
+        .upload_mode
+        .eq_ignore_ascii_case("path");
+    if path_mode {
+        logger.info("path モードのため待機をスキップ");
+    } else {
+        wait_for_ready(
+            &cfg.epgstation_upload,
+            clock.as_ref(),
+            readiness,
+            logger,
+            margin,
+        );
+    }
     let (description, extended) = read_program(r, &cfg.epgstation_upload, logger);
     let base = cfg.epgstation_upload.epgstation_url.trim_end_matches('/');
     let created = http.post_json(
@@ -666,18 +724,18 @@ pub fn process_recording(
     let id = created["recordedId"]
         .as_i64()
         .ok_or_else(|| anyhow!("recorded応答に recordedId がありません"))?;
-    wait_for_ready(
-        &cfg.epgstation_upload,
-        clock.as_ref(),
-        readiness,
-        logger,
-        margin,
-    );
+    logger.info(&format!("recorded 作成: recordedId={id} title={}", r.title));
     upload(http, &cfg.epgstation_upload, r, id, logger, clock.clone())?;
     delete_recording(&r.filepath, &cfg.epgstation_upload, clock.as_ref(), logger);
     if cfg.epgstation_encode.run_encode {
         encode(http, cfg, id, clock.as_ref(), logger)?;
+    } else {
+        logger.info("エンコードは無効 (runEncode=false)");
     }
+    logger.info(&format!(
+        "完了: recordedId={id} 所要 {:.3}s",
+        clock.now().saturating_sub(started).as_secs_f64()
+    ));
     Ok(())
 }
 pub fn entry() {

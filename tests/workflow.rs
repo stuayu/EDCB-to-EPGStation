@@ -15,7 +15,7 @@ use std::{
 
 #[derive(Default)]
 struct FakeClock {
-    state: Mutex<(Duration, Vec<Duration>)>,
+    state: Mutex<(Duration, Vec<Duration>, usize)>,
 }
 impl Clock for FakeClock {
     fn now(&self) -> Duration {
@@ -24,12 +24,16 @@ impl Clock for FakeClock {
     fn sleep(&self, d: Duration) {
         let mut s = self.state.lock().unwrap();
         s.0 += d;
+        s.2 += 1;
         if !d.is_zero() {
             s.1.push(d);
         }
     }
 }
 impl FakeClock {
+    fn sleep_calls(&self) -> usize {
+        self.state.lock().unwrap().2
+    }
     fn sleeps(&self) -> Vec<u64> {
         self.state
             .lock()
@@ -223,7 +227,7 @@ fn template_and_omitted_new_defaults() {
             u.max_wait_minutes,
             u.log_level.as_str()
         ),
-        ("upload", 0.0, 5, 720, "info")
+        ("upload", 0.0, 5, 30, "info")
     );
 }
 #[test]
@@ -236,7 +240,7 @@ fn file_workflow_multipart_delete_then_encode() {
         (200, r#"{"recordedId":42}"#),
         (201, r#"{"recordedId":42,"message":"登録"}"#),
         (200, r#"{"videoFiles":[{"id":8}]}"#),
-        (204, ""),
+        (200, r#"{"encodeId":99}"#),
     ]);
     c.epgstation_upload.epgstation_url = server.url.clone();
     c.epgstation_encode.parent_dir = None;
@@ -244,6 +248,12 @@ fn file_workflow_multipart_delete_then_encode() {
     execute(&c, &r, clock.clone(), &t.logger()).unwrap();
     assert!(!r.filepath.exists());
     assert_eq!(clock.sleeps(), [2]);
+    let log = fs::read_to_string(t.0.join("test.log")).unwrap();
+    assert!(log.contains("recorded 作成: recordedId=42 title=番組"));
+    assert!(log.contains("upload 成功: recordedId=42 size=17 elapsed=0.000 (1/5 回目)"));
+    assert!(log.contains("videoFileId=8"));
+    assert!(log.contains("エンコード依頼: encodeId=99 mode=HEVC_CMカット"));
+    assert!(log.contains("完了: recordedId=42 所要 2.000s"));
     let req = server.finish();
     assert!(req[0].line.starts_with("POST /api/recorded "));
     let body: Value = serde_json::from_slice(&req[0].body).unwrap();
@@ -277,18 +287,48 @@ fn path_workflow_sends_exact_path_without_file() {
     let mut c = config();
     c.epgstation_upload.upload_mode = "path".into();
     c.epgstation_upload.delete_edcb_rec_file = false;
+    c.epgstation_encode.run_encode = true;
     let s = Server::new(vec![
         (200, r#"{"recordedId":1}"#),
-        (200, r#"{"recordedId":null}"#),
+        (200, r#"{"recordedId":1}"#),
+        (200, r#"{"videoFiles":[{"id":2}]}"#),
+        (200, r#"{"encodeId":3}"#),
     ]);
     c.epgstation_upload.epgstation_url = s.url.clone();
-    execute(&c, &r, Arc::new(FakeClock::default()), &t.logger()).unwrap();
+    let clock = Arc::new(FakeClock::default());
+    let mut readiness = Ready::default();
+    process_recording(
+        &c,
+        &r,
+        &ReqwestHttp::new().unwrap(),
+        clock.clone(),
+        &mut readiness,
+        &t.logger(),
+        Duration::from_secs(9),
+    )
+    .unwrap();
+    assert_eq!(clock.sleep_calls(), 0);
+    assert_eq!((readiness.refreshes, readiness.process_checks), (0, 0));
+    assert!(
+        fs::read_to_string(t.0.join("test.log"))
+            .unwrap()
+            .contains("path モードのため待機をスキップ")
+    );
+    let log = fs::read_to_string(t.0.join("test.log")).unwrap();
+    assert!(log.contains("recorded 作成: recordedId=1 title=番組"));
+    assert!(log.contains("path 登録成功: recordedId=1 (1/5 回目)"));
+    assert!(log.contains("エンコード依頼: encodeId=3 mode=HEVC_CMカット"));
+    assert!(log.contains("完了: recordedId=1 所要 0.000s"));
     let req = s.finish();
     assert_eq!(
         field(&req[1], "localFilePath"),
         r.filepath.to_str().unwrap().as_bytes()
     );
     assert!(!String::from_utf8_lossy(&req[1].body).contains("name=\"file\""));
+    assert!(req[0].line.starts_with("POST /api/recorded "));
+    assert!(req[2].line.starts_with("GET /api/recorded/1"));
+    assert!(req[3].line.starts_with("POST /api/encode "));
+    assert_eq!(req.len(), 4);
     assert!(r.filepath.exists());
 }
 #[test]
@@ -393,12 +433,13 @@ fn deletion_missing_and_failure_logging() {
         &clock,
         &t.logger(),
     );
-    assert_eq!(clock.sleeps(), [2]);
+    // 既に存在しないファイルは delayDeleteTime を待たずにスキップする
+    assert!(clock.sleeps().is_empty());
     let dir = t.0.join("directory.ts");
     fs::create_dir(&dir).unwrap();
     delete_recording(&dir, &c.epgstation_upload, &clock, &t.logger());
     assert!(dir.exists());
-    assert_eq!(clock.sleeps(), [vec![2, 2], vec![30; 10]].concat());
+    assert_eq!(clock.sleeps(), [vec![2], vec![30; 10]].concat());
     let log = fs::read_to_string(t.0.join("test.log")).unwrap();
     assert!(log.contains("既に存在しない"));
     assert!(log.contains("10回試行"));
@@ -536,7 +577,7 @@ fn workflow_injected_http_observes_wait_delete_encode_order() {
     impl Http for ObservingHttp {
         fn post_json(&self, url: &str, _: Value) -> anyhow::Result<Value> {
             if url.ends_with("/api/recorded") {
-                assert_eq!(self.clock.now(), Duration::ZERO);
+                assert_eq!(self.clock.sleeps(), [3, 1]);
                 self.calls.lock().unwrap().push("recorded");
                 Ok(json!({"recordedId":9}))
             } else {
@@ -589,6 +630,83 @@ fn workflow_injected_http_observes_wait_delete_encode_order() {
         ["recorded", "upload", "get", "encode"]
     );
 }
+
+#[test]
+fn zero_byte_recording_skips_all_http_and_keeps_file() {
+    struct NoHttp;
+    impl Http for NoHttp {
+        fn post_multipart(
+            &self,
+            _: &str,
+            _: reqwest::blocking::multipart::Form,
+        ) -> anyhow::Result<Value> {
+            panic!("HTTP must not be called")
+        }
+        fn post_json(&self, _: &str, _: Value) -> anyhow::Result<Value> {
+            panic!("HTTP must not be called")
+        }
+        fn get_json(&self, _: &str) -> anyhow::Result<Value> {
+            panic!("HTTP must not be called")
+        }
+    }
+    let t = Temp::new();
+    let r = t.recording();
+    fs::write(&r.filepath, []).unwrap();
+    let c = config();
+    let clock = Arc::new(FakeClock::default());
+    process_recording(
+        &c,
+        &r,
+        &NoHttp,
+        clock.clone(),
+        &mut Ready::default(),
+        &t.logger(),
+        Duration::from_secs(10),
+    )
+    .unwrap();
+    assert!(r.filepath.exists());
+    assert_eq!(clock.sleep_calls(), 0);
+    assert!(
+        fs::read_to_string(t.0.join("test.log"))
+            .unwrap()
+            .contains("録画ファイルが 0 バイトのため登録をスキップ")
+    );
+}
+
+#[test]
+fn missing_recording_fails_before_http() {
+    struct NoHttp;
+    impl Http for NoHttp {
+        fn post_multipart(
+            &self,
+            _: &str,
+            _: reqwest::blocking::multipart::Form,
+        ) -> anyhow::Result<Value> {
+            panic!("HTTP must not be called")
+        }
+        fn post_json(&self, _: &str, _: Value) -> anyhow::Result<Value> {
+            panic!("HTTP must not be called")
+        }
+        fn get_json(&self, _: &str) -> anyhow::Result<Value> {
+            panic!("HTTP must not be called")
+        }
+    }
+    let t = Temp::new();
+    let r = t.recording();
+    fs::remove_file(&r.filepath).unwrap();
+    let c = config();
+    let error = process_recording(
+        &c,
+        &r,
+        &NoHttp,
+        Arc::new(FakeClock::default()),
+        &mut Ready::default(),
+        &t.logger(),
+        Duration::ZERO,
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("録画ファイルを確認できません"));
+}
 #[test]
 fn encode_accepts_non_json_success_body() {
     let t = Temp::new();
@@ -604,6 +722,8 @@ fn encode_accepts_non_json_success_body() {
     c.epgstation_upload.epgstation_url = s.url.clone();
     execute(&c, &r, Arc::new(FakeClock::default()), &t.logger()).unwrap();
     assert_eq!(s.finish().len(), 4);
+    let log = fs::read_to_string(t.0.join("test.log")).unwrap();
+    assert!(log.contains("エンコード依頼: encodeId=不明 mode=HEVC_CMカット"));
 }
 #[test]
 fn invalid_program_still_creates_recorded_with_empty_metadata() {
