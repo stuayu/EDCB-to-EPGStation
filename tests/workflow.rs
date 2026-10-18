@@ -747,6 +747,36 @@ fn invalid_program_still_creates_recorded_with_empty_metadata() {
             .contains("番組情報ファイルを開けません")
     );
 }
+
+#[test]
+fn huge_drop_log_is_trimmed_in_recorded_post() {
+    let t = Temp::new();
+    let r = t.recording();
+    fs::write(
+        format!("{}.err", r.filepath.display()),
+        format!(
+            "{}\nPID: 0x0000 Total: 999 Drop: 1 PAT\n使用BonDriver : test\n",
+            "時系列ログ".repeat(8_000)
+        ),
+    )
+    .unwrap();
+    let mut c = config();
+    c.epgstation_upload.delete_edcb_rec_file = false;
+    let server = Server::new(vec![
+        (200, r#"{"recordedId":1}"#),
+        (200, r#"{"recordedId":1}"#),
+    ]);
+    c.epgstation_upload.epgstation_url = server.url.clone();
+    execute(&c, &r, Arc::new(FakeClock::default()), &t.logger()).unwrap();
+    let req = server.finish();
+    let body: Value = serde_json::from_slice(&req[0].body).unwrap();
+    let extended = body["extended"].as_str().unwrap();
+    assert!(extended.len() <= 60_000);
+    assert!(extended.starts_with("本文\n\n(ドロップログが長いため先頭 "));
+    assert!(extended.contains("PID: 0x0000 Total: 999 Drop: 1 PAT"));
+    assert!(extended.contains("使用BonDriver : test"));
+    assert!(extended.contains("本文"));
+}
 #[test]
 fn rate_reader_accounts_for_elapsed_time_and_rejects_unrepresentable_delay() {
     let clock = Arc::new(FakeClock::default());

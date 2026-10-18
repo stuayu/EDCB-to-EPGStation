@@ -250,6 +250,19 @@ pub fn decode(bytes: &[u8], encoding: &str) -> Result<String> {
     Ok(text.into_owned())
 }
 pub fn parse_program(prog: &str, drop: &str) -> Result<(String, String)> {
+    let (desc, ext) = parse_program_parts(prog)?;
+    Ok((
+        desc,
+        format!(
+            "{}\n{}",
+            ext,
+            drop.replace("\r\n", "\n").replace('\r', "\n")
+        ),
+    ))
+}
+const MAX_EXTENDED_BYTES: usize = 60_000;
+
+fn parse_program_parts(prog: &str) -> Result<(String, String)> {
     let normalized = prog.replace("\r\n", "\n").replace('\r', "\n");
     let lines: Vec<_> = normalized.split('\n').collect();
     let desc = lines
@@ -269,14 +282,53 @@ pub fn parse_program(prog: &str, drop: &str) -> Result<(String, String)> {
         .min()
         .unwrap_or(tail.len());
     let ext = &tail[..end];
-    Ok((
-        desc,
-        format!(
-            "{}\n{}",
-            ext,
-            drop.replace("\r\n", "\n").replace('\r', "\n")
-        ),
-    ))
+    Ok((desc, ext.to_string()))
+}
+
+fn limit_extended(program: &str, drop: &str, logger: &Logger) -> String {
+    let original_bytes = program.len() + 1 + drop.len();
+    let result = if original_bytes <= MAX_EXTENDED_BYTES {
+        format!("{program}\n{drop}")
+    } else if program.len() + 1 > MAX_EXTENDED_BYTES {
+        let mut end = MAX_EXTENDED_BYTES;
+        while !program.is_char_boundary(end) {
+            end -= 1;
+        }
+        program[..end].to_string()
+    } else {
+        let available = MAX_EXTENDED_BYTES - program.len() - 1;
+        let lines: Vec<&str> = drop.split_inclusive('\n').collect();
+        // 先頭行から順に落とし、残りの長さは引き算で追う (毎回連結しない)。
+        let mut omitted = 0;
+        let mut tail_len = drop.len();
+        loop {
+            let note = format!("(ドロップログが長いため先頭 {omitted} 行を省略)\n");
+            if note.len() > available {
+                let note = format!("(ドロップログが長いため先頭 {} 行を省略)\n", lines.len());
+                let mut end = MAX_EXTENDED_BYTES - note.len() - 1;
+                while !program.is_char_boundary(end) {
+                    end -= 1;
+                }
+                break format!("{}\n{note}", &program[..end]);
+            }
+            if note.len() + tail_len <= available {
+                break format!("{program}\n{note}{}", lines[omitted..].concat());
+            }
+            if omitted == lines.len() {
+                break format!("{program}\n{note}");
+            }
+            tail_len -= lines[omitted].len();
+            omitted += 1;
+        }
+    };
+    if original_bytes > MAX_EXTENDED_BYTES {
+        logger.warn(&format!(
+            "extended を切り詰め: 元={} bytes, 後={} bytes",
+            original_bytes,
+            result.len()
+        ));
+    }
+    result
 }
 pub fn read_program(r: &Recording, cfg: &UploadConfig, logger: &Logger) -> (String, String) {
     let (p, d) = paths(r, cfg.rec_details_program_folder.as_deref());
@@ -295,7 +347,9 @@ pub fn read_program(r: &Recording, cfg: &UploadConfig, logger: &Logger) -> (Stri
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(e.into()),
         };
-        parse_program(&prog, &drop)
+        let (description, program) = parse_program_parts(&prog)?;
+        let drop = drop.replace("\r\n", "\n").replace('\r', "\n");
+        Ok((description, limit_extended(&program, &drop, logger)))
     })();
     result.unwrap_or_else(|e| {
         logger.warn(&format!(
