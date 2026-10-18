@@ -871,3 +871,289 @@ fn cli_encode_http_failure_exits_nonzero_and_logs_at_executable_directory() {
     assert!(log.contains("[ERROR]"));
     assert!(String::from_utf8_lossy(&output.stderr).contains("HTTP 304"));
 }
+
+fn manifest_line(r: &Recording, id: Option<i64>) -> String {
+    serde_json::json!({"filepath":r.filepath,"filename":r.filename,"title":r.title,"onid":r.onid,"sid":"12","startAt":r.start,"endAt":r.end,"recordedId":id}).to_string()
+}
+
+fn run_backfill_test(
+    t: &Temp,
+    c: &Config,
+    manifest: &std::path::Path,
+    opts: BackfillOptions,
+    http: &dyn Http,
+    clock: Arc<FakeClock>,
+) -> BackfillSummary {
+    backfill(c, manifest, &opts, http, clock, &t.logger()).unwrap()
+}
+
+#[test]
+fn backfill_dry_run_logs_plan_without_http() {
+    struct NoHttp;
+    impl Http for NoHttp {
+        fn post_multipart(
+            &self,
+            _: &str,
+            _: reqwest::blocking::multipart::Form,
+        ) -> anyhow::Result<Value> {
+            panic!("dry run POST")
+        }
+        fn post_json(&self, _: &str, _: Value) -> anyhow::Result<Value> {
+            panic!("dry run POST")
+        }
+        fn get_json(&self, _: &str) -> anyhow::Result<Value> {
+            panic!("dry run GET")
+        }
+    }
+    let t = Temp::new();
+    let r = t.recording();
+    let manifest = t.0.join("manifest.jsonl");
+    fs::write(&manifest, manifest_line(&r, None)).unwrap();
+    let c = config();
+    let summary = run_backfill_test(
+        &t,
+        &c,
+        &manifest,
+        BackfillOptions {
+            apply: false,
+            interval_sec: 5,
+            limit: None,
+        },
+        &NoHttp,
+        Arc::new(FakeClock::default()),
+    );
+    assert_eq!(summary.succeeded, 1);
+    assert!(
+        fs::read_to_string(t.0.join("test.log"))
+            .unwrap()
+            .contains("ドライラン: 新規登録予定")
+    );
+}
+
+#[test]
+fn backfill_new_created_resume_and_uploaded_state_use_path_mode() {
+    let t = Temp::new();
+    let r = t.recording();
+    let manifest = t.0.join("manifest.jsonl");
+    let state = t.0.join("manifest.jsonl.state.jsonl");
+    let mut c = config();
+    c.epgstation_upload.upload_mode = "upload".into();
+    let line = manifest_line(&r, None);
+    fs::write(&manifest, &line).unwrap();
+    let s = Server::new(vec![
+        (200, r#"{"recordedId":41}"#),
+        (200, r#"{"recordedId":41}"#),
+    ]);
+    c.epgstation_upload.epgstation_url = s.url.clone();
+    let summary = run_backfill_test(
+        &t,
+        &c,
+        &manifest,
+        BackfillOptions {
+            apply: true,
+            interval_sec: 5,
+            limit: None,
+        },
+        &ReqwestHttp::new().unwrap(),
+        Arc::new(FakeClock::default()),
+    );
+    assert_eq!(summary.succeeded, 1);
+    let requests = s.finish();
+    assert!(requests[0].line.starts_with("POST /api/recorded "));
+    assert_eq!(
+        field(&requests[1], "localFilePath"),
+        r.filepath.to_str().unwrap().as_bytes()
+    );
+    assert!(!String::from_utf8_lossy(&requests[1].body).contains("name=\"file\""));
+    let state_text = fs::read_to_string(&state).unwrap();
+    assert!(state_text.contains("\"phase\":\"created\""));
+    assert!(state_text.contains("\"phase\":\"uploaded\""));
+
+    fs::write(
+        &state,
+        format!(
+            "{{\"filepath\":{},\"recordedId\":52,\"phase\":\"created\"}}\n",
+            serde_json::to_string(&r.filepath).unwrap()
+        ),
+    )
+    .unwrap();
+    let s = Server::new(vec![(200, r#"{"recordedId":52}"#)]);
+    c.epgstation_upload.epgstation_url = s.url.clone();
+    let summary = run_backfill_test(
+        &t,
+        &c,
+        &manifest,
+        BackfillOptions {
+            apply: true,
+            interval_sec: 5,
+            limit: None,
+        },
+        &ReqwestHttp::new().unwrap(),
+        Arc::new(FakeClock::default()),
+    );
+    assert_eq!(summary.succeeded, 1);
+    assert!(s.finish()[0].line.starts_with("POST /api/videos/upload "));
+
+    fs::write(
+        &state,
+        format!(
+            "{{\"filepath\":{},\"recordedId\":52,\"phase\":\"uploaded\"}}\n",
+            serde_json::to_string(&r.filepath).unwrap()
+        ),
+    )
+    .unwrap();
+    let summary = run_backfill_test(
+        &t,
+        &c,
+        &manifest,
+        BackfillOptions {
+            apply: true,
+            interval_sec: 5,
+            limit: None,
+        },
+        &panic_http(),
+        Arc::new(FakeClock::default()),
+    );
+    assert_eq!(summary.skipped, 1);
+}
+
+fn panic_http() -> impl Http {
+    struct NoHttp;
+    impl Http for NoHttp {
+        fn post_multipart(
+            &self,
+            _: &str,
+            _: reqwest::blocking::multipart::Form,
+        ) -> anyhow::Result<Value> {
+            panic!("unexpected POST")
+        }
+        fn post_json(&self, _: &str, _: Value) -> anyhow::Result<Value> {
+            panic!("unexpected POST")
+        }
+        fn get_json(&self, _: &str) -> anyhow::Result<Value> {
+            panic!("unexpected GET")
+        }
+    }
+    NoHttp
+}
+
+#[test]
+fn backfill_existing_recorded_video_check_and_skips_bad_or_empty_files() {
+    let t = Temp::new();
+    let r = t.recording();
+    let manifest = t.0.join("manifest.jsonl");
+    let mut empty = r.clone();
+    empty.filepath = t.0.join("empty.ts");
+    fs::write(&empty.filepath, []).unwrap();
+    let missing = Recording {
+        filepath: t.0.join("missing.ts"),
+        ..r.clone()
+    };
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n{}\n{}\n{{bad json}}\n",
+            manifest_line(&r, Some(3)),
+            manifest_line(&empty, Some(4)),
+            manifest_line(&missing, Some(5))
+        ),
+    )
+    .unwrap();
+    let s = Server::new(vec![
+        (200, r#"{"videoFiles":[]}"#),
+        (200, r#"{"recordedId":3}"#),
+    ]);
+    let mut c = config();
+    c.epgstation_upload.epgstation_url = s.url.clone();
+    let clock = Arc::new(FakeClock::default());
+    let summary = backfill(
+        &c,
+        &manifest,
+        &BackfillOptions {
+            apply: true,
+            interval_sec: 5,
+            limit: None,
+        },
+        &ReqwestHttp::new().unwrap(),
+        clock.clone(),
+        &t.logger(),
+    )
+    .unwrap();
+    let req = s.finish();
+    assert!(req[0].line.starts_with("GET /api/recorded/3"));
+    assert!(req[1].line.starts_with("POST /api/videos/upload"));
+    assert_eq!(summary.succeeded, 1);
+    assert_eq!(summary.skipped, 2);
+    assert_eq!(summary.failed, 1);
+}
+
+#[test]
+fn backfill_interval_limit_and_failure_continue() {
+    let t = Temp::new();
+    let r1 = t.recording();
+    let mut r2 = r1.clone();
+    r2.filepath = t.0.join("録画2.ts");
+    r2.filename = "録画2".into();
+    fs::write(&r2.filepath, b"second TS").unwrap();
+    let manifest = t.0.join("many.jsonl");
+    fs::write(
+        &manifest,
+        format!(
+            "{}\n{}\n",
+            manifest_line(&r1, None),
+            manifest_line(&r2, None)
+        ),
+    )
+    .unwrap();
+    let mut c = config();
+    c.epgstation_upload.upload_max_retry = 1;
+    let s = Server::new(vec![
+        (500, "{}"),
+        (200, r#"{"recordedId":62}"#),
+        (200, r#"{"recordedId":62}"#),
+    ]);
+    c.epgstation_upload.epgstation_url = s.url.clone();
+    let clock = Arc::new(FakeClock::default());
+    let summary = backfill(
+        &c,
+        &manifest,
+        &BackfillOptions {
+            apply: true,
+            interval_sec: 7,
+            limit: Some(2),
+        },
+        &ReqwestHttp::new().unwrap(),
+        clock.clone(),
+        &t.logger(),
+    )
+    .unwrap();
+    assert_eq!(
+        (summary.succeeded, summary.skipped, summary.failed),
+        (1, 0, 1)
+    );
+    assert_eq!(clock.sleeps(), [7]);
+    assert_eq!(s.finish().len(), 3);
+
+    let s = Server::new(vec![
+        (200, r#"{"recordedId":71}"#),
+        (200, r#"{"recordedId":71}"#),
+    ]);
+    c.epgstation_upload.epgstation_url = s.url.clone();
+    let clock = Arc::new(FakeClock::default());
+    let summary = backfill(
+        &c,
+        &manifest,
+        &BackfillOptions {
+            apply: true,
+            interval_sec: 9,
+            limit: Some(1),
+        },
+        &ReqwestHttp::new().unwrap(),
+        clock.clone(),
+        &t.logger(),
+    )
+    .unwrap();
+    assert_eq!(summary.succeeded, 1);
+    assert!(clock.sleeps().is_empty());
+    assert_eq!(s.finish().len(), 2);
+}

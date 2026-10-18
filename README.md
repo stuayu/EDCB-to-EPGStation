@@ -60,6 +60,23 @@ RUSTC="$(rustup which rustc)" cargo build --release --target x86_64-pc-windows-g
 - `maxWaitMinutes`: `30`。プロセス・CPU 待機の合計上限（分）
 - `logLevel`: `info` または `debug`。標準は `info`
 
+### 未登録録画の一括登録 (backfill)
+
+録画フォルダに残った TS を manifest に記載し、EPGStation へ登録します。manifest は UTF-8 の JSON Lines 形式で、1行に1件を記述します。空行は無視します。
+
+```json
+{"filepath":"F:\\EDCB\\202609030055_サンダー3_FTV福島テレビ1.ts","filename":"202609030055_サンダー3_FTV福島テレビ1","title":"サンダー３＜＋Ｕｌｔｒａ＞　＃０９","onid":"32418","sid":"21520","startAt":1788364500000,"endAt":1788366300000,"recordedId":null}
+```
+
+`recordedId` が `null` の場合は recorded エントリを新規作成します。数値の場合はその recorded エントリに動画を紐付けます。まずドライランで対象と処理予定を確認し、問題がなければ `--apply` を付けて実行します。
+
+```sh
+edcb_to_epgstation_ts.exe backfill manifest.jsonl
+edcb_to_epgstation_ts.exe backfill manifest.jsonl --apply
+```
+
+`--interval-sec N` は処理対象間の待機秒数 (既定5秒)、`--limit N` は処理対象の上限です。状態は manifest と同じ場所の `manifest.jsonl.state.jsonl` に追記します。`created` の記録があればその recordedId から再開し、`uploaded` 済みでファイルが残っている項目は二重登録防止のためスキップします。backfill は常に `localFilePath` を使い、エンコードと録画ファイル削除は行いません。
+
 ### Rust 版の動作と検証
 
 - 録画日時は PC のタイムゾーンに関係なく JST として変換します。

@@ -129,7 +129,7 @@ fn rotate(path: &Path) {
     let _ = fs::rename(path, PathBuf::from(format!("{}.1", path.display())));
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Recording {
     pub filepath: PathBuf,
     pub filename: String,
@@ -138,6 +138,41 @@ pub struct Recording {
     pub sid: String,
     pub start: i64,
     pub end: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ManifestEntry {
+    filepath: PathBuf,
+    filename: String,
+    title: String,
+    onid: String,
+    sid: String,
+    start_at: i64,
+    end_at: i64,
+    recorded_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BackfillOptions {
+    pub apply: bool,
+    pub interval_sec: u64,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct BackfillSummary {
+    pub succeeded: usize,
+    pub skipped: usize,
+    pub failed: usize,
+}
+
+#[derive(Debug, Deserialize)]
+struct BackfillState {
+    filepath: PathBuf,
+    #[serde(rename = "recordedId")]
+    recorded_id: i64,
+    phase: String,
 }
 const ENV_KEYS: &[&str] = &[
     "FILEPATH", "FILENAME", "TITLE", "ONID10", "SID10", "SDYYYY", "SDMM", "SDDD", "STHH", "STMM",
@@ -656,6 +691,59 @@ fn run() -> Result<()> {
     )
 }
 
+fn run_backfill(args: &[String]) -> Result<()> {
+    let usage = "使い方: edcb_to_epgstation_ts.exe backfill <manifest.jsonl> [--apply] [--interval-sec N] [--limit N]";
+    if args.len() < 2 || args[1].starts_with("--") {
+        bail!("{usage}");
+    }
+    let manifest = PathBuf::from(&args[1]);
+    let mut opts = BackfillOptions {
+        apply: false,
+        interval_sec: 5,
+        limit: None,
+    };
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--apply" => opts.apply = true,
+            "--interval-sec" | "--limit" => {
+                let flag = args[i].as_str();
+                i += 1;
+                let value = args.get(i).ok_or_else(|| anyhow!("{usage}"))?;
+                if flag == "--interval-sec" {
+                    opts.interval_sec = value.parse().with_context(|| usage.to_string())?;
+                } else {
+                    opts.limit = Some(value.parse().with_context(|| usage.to_string())?);
+                }
+            }
+            _ => bail!("{usage}"),
+        }
+        i += 1;
+    }
+    let exe = env::current_exe().context("exe path取得失敗")?;
+    let dir = exe.parent().ok_or_else(|| anyhow!("exe directoryなし"))?;
+    let cfg = load_config(&dir.join("config.yml"))?;
+    let logger = Logger::new(
+        dir.join("edcb_to_epgstation.log"),
+        cfg.epgstation_upload
+            .log_level
+            .eq_ignore_ascii_case("debug"),
+    );
+    let http = ReqwestHttp::new()?;
+    let summary = backfill(
+        &cfg,
+        &manifest,
+        &opts,
+        &http,
+        Arc::new(RealClock::default()),
+        &logger,
+    )?;
+    if summary.failed > 0 {
+        bail!("backfill失敗: {}件", summary.failed);
+    }
+    Ok(())
+}
+
 pub fn load_config(path: &Path) -> Result<Config> {
     let cfg: Config = serde_yaml::from_slice(
         &fs::read(path).with_context(|| format!("config.ymlを読めません: {}", path.display()))?,
@@ -738,8 +826,250 @@ pub fn process_recording(
     ));
     Ok(())
 }
+
+fn state_path(manifest: &Path) -> PathBuf {
+    let mut name = manifest
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".state.jsonl");
+    manifest.with_file_name(name)
+}
+
+fn read_backfill_state(path: &Path, logger: &Logger) -> Result<Vec<BackfillState>> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            logger.error(&format!("[backfill] 状態ファイルを読めません: {e}"));
+            return Err(e.into());
+        }
+    };
+    Ok(text
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| match serde_json::from_str(line) {
+            Ok(state) => Some(state),
+            Err(e) => {
+                logger.warn(&format!("[backfill] 状態ファイル行を無視: {e}"));
+                None
+            }
+        })
+        .collect())
+}
+
+fn append_backfill_state(path: &Path, filepath: &Path, id: i64, phase: &str) -> Result<()> {
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    serde_json::to_writer(
+        &mut file,
+        &serde_json::json!({"filepath": filepath, "recordedId": id, "phase": phase}),
+    )?;
+    file.write_all(b"\n")?;
+    file.flush()?;
+    Ok(())
+}
+
+fn recording_from_manifest(item: &ManifestEntry) -> Recording {
+    Recording {
+        filepath: item.filepath.clone(),
+        filename: item.filename.clone(),
+        title: item.title.clone(),
+        onid: item.onid.clone(),
+        sid: format!("{:0>5}", item.sid),
+        start: item.start_at,
+        end: item.end_at,
+    }
+}
+
+/// 登録済み録画の一括補完。HTTP・時計を差し替え可能。
+pub fn backfill(
+    cfg: &Config,
+    manifest: &Path,
+    opts: &BackfillOptions,
+    http: &dyn Http,
+    clock: Arc<dyn Clock>,
+    logger: &Logger,
+) -> Result<BackfillSummary> {
+    let text = fs::read_to_string(manifest)
+        .with_context(|| format!("manifestを読めません: {}", manifest.display()))?;
+    let state_file = state_path(manifest);
+    let mut states = read_backfill_state(&state_file, logger)?;
+    let mut summary = BackfillSummary::default();
+    let mut processed = 0usize;
+    let mut pending_interval = false;
+
+    for (index, line) in text.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let line_no = index + 1;
+        let item: ManifestEntry = match serde_json::from_str(line) {
+            Ok(item) => item,
+            Err(e) => {
+                logger.error(&format!("[backfill] 行={line_no} JSON不正: {e}"));
+                summary.failed += 1;
+                continue;
+            }
+        };
+        let id_text = item
+            .recorded_id
+            .map_or_else(|| "新規".into(), |id| id.to_string());
+        let prefix = format!(
+            "[backfill] 行={line_no} filename={} recordedId={id_text}",
+            item.filename
+        );
+        let metadata = match fs::metadata(&item.filepath) {
+            Ok(m) => m,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                logger.info(&format!(
+                    "{prefix} スキップ(ファイルなし。登録済みの可能性)"
+                ));
+                summary.skipped += 1;
+                continue;
+            }
+            Err(e) => {
+                logger.error(&format!("{prefix} ファイル確認失敗: {e}"));
+                summary.failed += 1;
+                continue;
+            }
+        };
+        if metadata.len() == 0 {
+            logger.info(&format!("{prefix} スキップ(0バイト)"));
+            summary.skipped += 1;
+            continue;
+        }
+
+        let matching: Vec<_> = states
+            .iter()
+            .filter(|s| s.filepath == item.filepath)
+            .collect();
+        let uploaded = matching.iter().any(|s| s.phase == "uploaded");
+        let resume_id = matching
+            .iter()
+            .rev()
+            .find(|s| s.phase == "created")
+            .map(|s| s.recorded_id);
+        if item.recorded_id.is_none() && uploaded {
+            logger.warn(&format!(
+                "{prefix} スキップ(uploaded状態あり・ファイル残存)"
+            ));
+            summary.skipped += 1;
+            continue;
+        }
+        if opts.limit.is_some_and(|limit| processed >= limit) {
+            break;
+        }
+        if !opts.apply {
+            let action = if let Some(id) = item.recorded_id {
+                format!("既存 recordedId={id} に紐付け予定")
+            } else if let Some(id) = resume_id {
+                format!("既存 recordedId={id} に再開予定")
+            } else {
+                "新規登録予定".to_string()
+            };
+            logger.info(&format!("{prefix} ドライラン: {action}"));
+            processed += 1;
+            summary.succeeded += 1;
+            continue;
+        }
+        let result = (|| -> Result<bool> {
+            let mut upload_cfg = cfg.epgstation_upload.clone();
+            upload_cfg.upload_mode = "path".into();
+            let recording = recording_from_manifest(&item);
+            let base = upload_cfg.epgstation_url.trim_end_matches('/');
+            let id = if let Some(id) = item.recorded_id {
+                let existing =
+                    http.get_json(&format!("{base}/api/recorded/{id}?isHalfWidth=true"))?;
+                let videos = existing["videoFiles"]
+                    .as_array()
+                    .ok_or_else(|| anyhow!("GET応答に videoFiles 配列がありません"))?;
+                if !videos.is_empty() {
+                    logger.info(&format!("{prefix} スキップ(既に動画あり)"));
+                    return Ok(true);
+                }
+                if pending_interval {
+                    clock.sleep(Duration::from_secs(opts.interval_sec));
+                }
+                id
+            } else if let Some(id) = resume_id {
+                if pending_interval {
+                    clock.sleep(Duration::from_secs(opts.interval_sec));
+                }
+                id
+            } else {
+                if pending_interval {
+                    clock.sleep(Duration::from_secs(opts.interval_sec));
+                }
+                let (description, extended) = read_program(&recording, &upload_cfg, logger);
+                let created = http.post_json(
+                    &format!("{base}/api/recorded"),
+                    serde_json::to_value(RecordedBody {
+                        channel_id: channel_id(&recording.onid, &recording.sid)?,
+                        start_at: recording.start,
+                        end_at: recording.end,
+                        name: &recording.title,
+                        description: &description,
+                        extended: &extended,
+                    })?,
+                )?;
+                let id = created["recordedId"]
+                    .as_i64()
+                    .ok_or_else(|| anyhow!("recorded応答に recordedId がありません"))?;
+                append_backfill_state(&state_file, &item.filepath, id, "created")?;
+                states.push(BackfillState {
+                    filepath: item.filepath.clone(),
+                    recorded_id: id,
+                    phase: "created".into(),
+                });
+                id
+            };
+            logger.info(&format!("{prefix} upload開始 recordedId={id}"));
+            upload(http, &upload_cfg, &recording, id, logger, clock.clone())?;
+            if item.recorded_id.is_none() {
+                append_backfill_state(&state_file, &item.filepath, id, "uploaded")?;
+                states.push(BackfillState {
+                    filepath: item.filepath.clone(),
+                    recorded_id: id,
+                    phase: "uploaded".into(),
+                });
+            }
+            Ok(false)
+        })();
+        let was_skipped = matches!(result, Ok(true));
+        match result {
+            Ok(true) => {
+                summary.skipped += 1;
+            }
+            Ok(false) => {
+                processed += 1;
+                summary.succeeded += 1;
+                logger.info(&format!("{prefix} 処理成功"));
+            }
+            Err(e) => {
+                processed += 1;
+                logger.error(&format!("{prefix} 処理失敗: {e:#}"));
+                summary.failed += 1;
+            }
+        }
+        if !was_skipped {
+            pending_interval = true;
+        }
+    }
+    logger.info(&format!(
+        "[backfill] 完了: 成功={} スキップ={} 失敗={}",
+        summary.succeeded, summary.skipped, summary.failed
+    ));
+    Ok(summary)
+}
+
 pub fn entry() {
-    if let Err(e) = run() {
+    let args: Vec<String> = env::args().collect();
+    let result = if args.get(1).is_some_and(|a| a == "backfill") {
+        run_backfill(&args[1..])
+    } else {
+        run()
+    };
+    if let Err(e) = result {
         let path = env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.join("edcb_to_epgstation.log")))
