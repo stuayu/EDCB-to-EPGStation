@@ -5,3 +5,5 @@ build
 *.dist
 *.onefile-build
 *.log*
+# Rust build output
+target/
